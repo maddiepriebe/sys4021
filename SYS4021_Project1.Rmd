@@ -1,0 +1,223 @@
+---
+title: 'SYS 4021: Project 1'
+author: "Maddie Priebe and Carly Elbaum"
+date: "2025-11-01"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+## Setup
+```{r}
+library(data.table)
+library(plyr)
+library(scales)
+library(grid)
+library(ggpubr)
+library(here)
+library(dplyr)
+library(ggfortify)
+library(tidyverse)
+library(car)       
+library(MASS) 
+library(lindia)
+#install.packages("performance")
+library(performance)  # for model diagnostics
+library(broom)        # for tidy model summaries
+library(ggplot2)
+library(psych)
+set.seed(42)
+```
+
+# Functions to Import Data and Create Data Frame from Multiple Files
+```{r}
+# function to input files into a list
+file.inputl <- function(my.path)
+{
+  my.dir <- getwd()
+  setwd(my.path)
+  my.files <- list.files(pattern=".csv")
+  acts <- lapply(my.files,read.csv)
+  setwd(my.dir)
+  return(acts)
+}
+
+# Function to create a data frame as the combination of multiple data frames in a list.
+combine.data <- function(Data.List, Vars)
+{
+  DF <- rbind(Data.List[[1]][, Vars])
+  for(i in 2:length(Data.List))
+  {
+    DF <- rbind(DF, Data.List[[i]][, Vars])
+  }
+  DF
+}
+```
+
+# Import Data 
+```{r}
+# change file path to match the the local location of the data
+my.data <- file.inputl("~/SYS4021_LinearStatisticalModels/traindata2024")
+
+# create data frame
+data <- combine.data(my.data)
+```
+
+# Prepare Data for Analysis 
+```{r}
+# Create Casualty column that combines injuries and deaths 
+data$CASUALTY <- data$TOTINJ + data$TOTKLD 
+
+# filter for casualties > 1, bad accidents
+df <- subset(data , CASUALTY >= 1)
+
+# Recoding for interpretability 
+
+# Recode Categorical 'Type'
+df$TYPE <- factor(df$TYPE, labels = c("Derailment", "HeadOn", "Rearend", "Side", "Raking", "BrokenTrain", "Hwy-Rail", "GradeX", "Obstruction", "Explosive", "Fire","Other", "SeeNarrative" ))
+
+# Recode Categorical 'TypeQ'
+df$TYPEQ <- factor(df$TYPEQ, labels = c("NA", "Freight", "Passenger", "Commuter", "Work", "Single", "CutofCars", "Yard", "Light", "Maint", "MaintOfWay", "Passenger", "Commuter", "ElectricMulti", "ElectricMulti"))
+
+# Recode Categorical 'Weather'
+df$WEATHER <- factor(df$WEATHER, labels = c("Clear", "Cloudy", "Rain", "Fog", "Sleet", "Snow"))
+
+# Recode Categorical 'Method'
+df$METHOD <- factor(as.integer(df$METHOD), levels = 1:16, labels = c("ATCS", "Auto Rrain Control", "Auto Train Stop", "Cab Signals", "Traffic Control", "Interlocking", "Automatic Block Rules", "Current of Traffic", "Time/Table/Train Orders", "Track Warrant Control", "Direct Traffic Control", "Yard Limits", "Special Instructions", "Other than Main Track", "Other", "Positive Train Control"))
+
+# Recode Categorical 'Visibility'
+df$VISIBLTY <- factor(df$VISIBLTY, labels = c("Dawn", "Day", "Dusk", "Dark"))
+
+# Recode CAUSE to aggreate by category
+df$Cause <- rep(NA, nrow(df))
+
+df$Cause[which(substr(df$CAUSE, 1, 1) == "M")] <- "M"
+df$Cause[which(substr(df$CAUSE, 1, 1) == "T")] <- "T"
+df$Cause[which(substr(df$CAUSE, 1, 1) == "S")] <- "S"
+df$Cause[which(substr(df$CAUSE, 1, 1) == "H")] <- "H"
+df$Cause[which(substr(df$CAUSE, 1, 1) == "E")] <- "E"
+
+df$Cause <- factor(df$Cause)
+
+df$TRKCLAS = ordered(df$TRKCLAS)
+
+# Filter Data Frame to Select Variables of Interest
+vars <- c("CASUALTY", "ACCDMG", "TYPE", "TYPEQ", "Cause", "WEATHER", "VISIBLTY", "TEMP", "TRNSPD", "METHOD", "TRKCLAS")
+
+df <- df[, vars]
+```
+
+Data Visualization: The first step for generating a well formed hypothesis is to visualize the data and get a sense of the underlying relationships between variables. To do this we create plots with both quantitative and qualitative variables. 
+
+**Accident Damage by Cause Group**
+```{r}
+ggplot(df, aes(x = Cause, y = ACCDMG, fill = Cause)) +
+  geom_boxplot(outlier.alpha = 0.3) +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "Accident Damage by Cause Group",
+       x = "Primary Cause Category",
+       y = "Total Damage ($)") +
+  theme_minimal()
+```
+From this plot, we can see that there are significant outliers in the H category, suggesting we should evaluate the rlationship between cause category and accident damage. 
+
+
+**Total Casualties by Accident Type**
+```{r}
+ggplot(df, aes(x = TYPE, y = CASUALTY)) +
+  geom_boxplot(outlier.alpha = 0.3) +
+  labs(title = "Casualties by Accident Type",
+      x = "Accident Type", y = "Casualty") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+From this plot, we can see that there are significant outliers in the Derailment category, suggesting that there may be more Casualties in Derailment Type Accidents than other accidents. 
+
+**Median and Mean Accident Damage by Cause Group**
+```{r}
+df %>%
+  group_by(Cause) %>%
+  summarise(med_dmg = median(ACCDMG, na.rm = TRUE), avg_dmg = mean(ACCDMG, na.rm = TRUE))
+```
+The median damage is significantly higher in 'S' cause accidents. 
+
+**Median and Mean Damage by Weather**
+```{r}
+df %>%
+  group_by(WEATHER) %>%
+  summarise(med_dmg = median(ACCDMG, na.rm = TRUE), avg_dmg = mean(ACCDMG, na.rm = TRUE))
+
+```
+
+**Train Speed vs Accident Damage**
+```{r}
+ggplot(df, aes(x = TRNSPD, y = ACCDMG)) +
+  geom_point(alpha = 0.25) +
+  labs(title = "Train Speed vs. Damage",
+       x = "Train Speed (mph)", y = "Total Damage ($)") +
+  scale_y_continuous(labels = scales::dollar) +
+  theme_minimal()
+```
+
+**Extreme Damage Subset**
+```{r}
+Q3   <- quantile(df$ACCDMG, 0.75, na.rm = TRUE)
+IQRv <- IQR(df$ACCDMG, na.rm = TRUE)
+uw   <- Q3 + 1.5 * IQRv
+dx   <- subset(df, ACCDMG > uw & ACCDMG > 0)
+
+ggplot(dx, aes(TRNSPD, ACCDMG)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(title = "Train Speed vs. Damage (Extreme-Damage Accidents)",
+       x = "Train Speed (mph)", y = "Total Damage") +
+  theme_minimal()
+```
+
+# For lower-class tracks, increases in train speed result
+
+
+**ACCDMG HYPOTHESES**
+1: Train Operator - Human Factor (Cause = H) accidents have higher damages among extreme accidents than other causes 
+
+Why is this actionable: This would suggest that the FRA could focus on training procedures and human-error mitigations to prevent these high cost tail events.
+
+Null (H_0): In the extreme damage subset, mean(ACCDMG) for Cause = H equals mean(ACCDMG) of other Causes 
+Alt (H_1): In the extreme damage subset, mean(ACCDMG) for Cause = H is greater than other Causes
+
+
+
+2: Train Speed (TRNSPD) is associated with a steeper increase in damages for Human and Miscelaneous Caused Accidents
+
+Why is this actionable: Speed guidelines and operational rules can be esaily altered and the FRA could create stronger penalties for those who do not follow the rules. This is especcially prevalent in Human Caused Accidents because humans can be told what to do.
+
+Null (H_0): B for TRNSPD:CauseH, TRNSPD:CauseM = 0
+Alt (H_1): B for TRNSPD:CauseH, TRNSPD:CauseM > 0
+
+
+**Casualties Hypotheses**
+1: Ad
+
+Actionable
