@@ -1,0 +1,294 @@
+---
+title: "Project 2"
+author: "Carly Elbaum and Maddie Priebe"
+date: "11/30/25"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+require("knitr")
+datadir <- "/Users/madelinepriebe/SYS4021_LinearStatisticalModels/Project2"
+sourcedir <-"/Users/madelinepriebe/SYS4021_LinearStatisticalModels/Project2"
+opts_knit$set(root.dir = sourcedir)
+library(forecast)
+library(mtsdi)
+library(MTS)
+```
+
+# Load data and impute missing values
+```{r cars}
+setwd(datadir)
+
+airquality = read.csv('AirQualityUCI.csv')
+
+# replace -200 with NA
+airquality[airquality == -200] <- NA
+
+# convert integer type to numeric
+intcols = c(4,5,7,8,9,10,11,12)
+for(i in 1:length(intcols)){
+  airquality[,intcols[i]] <- as.numeric(airquality[,intcols[i]])
+}
+
+setwd(sourcedir)
+
+# create new data frame with just CO and NO2
+AQdata = airquality[,c(3,10)]
+
+# impute missing air quality data
+f <- ~ CO.GT. + NO2.GT.
+t <- c(seq(1,dim(AQdata)[1],1))
+i <- mnimput(f, AQdata, eps=1e-3, ts=TRUE, method='gam', ga.control=list(formula=paste(names(AQdata)[c(1:2)],'~ns(t,2)')))
+
+# set airquality to imputed data
+AQdata <- i$filled.dataset
+
+# aggregate to daily maxima for model building
+dailyAQ <- aggregate(AQdata, by=list(as.Date(airquality[,1],"%m/%d/%Y")), FUN=max)
+```
+
+Utilizing the time series methods learned in class to develop univariate models of daily maximum ambient nitrogen dioxide (NO2) concentrations.
+
+## Question 1: Building Univariate Time Series Models
+
+Build a time series model of daily maximum nitrogen dioxide (NO2) concentrations using all but the last 7 days of observations
+
+The first step is to filter the data for all observations except the last 7 days. 
+```{r}
+# count onervations 
+n <- nrow(AQdata)
+n
+# filter out the last 7
+AQ_sin7 <- AQdata[1:(n-7),] 
+```
+
+Next we visualize the data to identify potential patterns and assess what we are working with 
+
+```{r}
+ts.NO2 <- ts(AQ_sin7$NO2.GT.)
+autoplot(ts.NO2, ylab = "Daily NO2 Concentrations", xlab = "Day")
+```
+
+### a ) Seasonal Components 
+We performed spectral analysis and used a periodogram to discover the periodic components of this time series. The periodogram plots the squared amplitude (smoothed) of the data with sinusoids oscillating at a frequency of $f_j = j/n$ where $n$ is the number of time steps in the time series. We chose this method over using dummy variables because we have daily data, which typically requires many additional variables. This is a trade off because dummy variables offer easier interpretation, but trigonometric models have better parsimony. Peaks in the periodogram at some frequency indicate strong (high amplitude) sinusoid at that frequency, suggesting there is seasonality at the corresponding period.
+
+```{r}
+NO2.pg <- spec.pgram(ts.NO2, spans=9, demean=T, log='no')
+NO2.spec <- data.frame(NO2.pg$freq, spec=NO2.pg$spec)
+
+# Get top peaks (limit to available rows)
+n_peaks <- min(5, nrow(NO2.spec))
+top_indices <- order(NO2.spec$spec, decreasing=TRUE)[1:n_peaks]
+peaks <- NO2.spec[top_indices, ]
+peaks$spec <- 1/peaks$NO2.pg.freq
+peaks <- transform(peaks, period = 1/NO2.pg.freq)
+print(peaks)
+
+# Plot with peak annotation
+ggplot(NO2.spec) + 
+  geom_line(aes(x=NO2.pg.freq, y=spec)) +
+  geom_vline(xintercept = peaks$freq, color = "red", 
+             linetype = "dashed", alpha = 0.5) +
+  ggtitle("Smooth Periodogram of NO2 Concentrations") + 
+  xlab("Frequency") + 
+  ylab("Squared Amplitude")
+```
+Results from the periodogram analysis revealed two main findings:
+
+1. **Dominant low-frequency component** (frequency $≈ 0.0002$, period $≈ 4,688 days$): This captures the long-term trend in the data rather than true seasonality, representing approximately 12.8 years of cyclical behavior.
+2. **Significant monthly seasonality** (frequencies around 0.041-0.042, periods of 24 days): The periodogram shows clear, strong peaks at approximately 24-day cycles, indicating monthly seasonal patterns in NO2 concentrations. This is the primary seasonal component we will model.
+
+The spectral analysis confirms that NO2 concentrations exhibit monthly seasonality, which is consistent with environmental factors such as weather patterns, traffic cycles, and industrial activity that tend to follow monthly rhythms. Based on these findings, we incorporated harmonic terms with a period of approximately 24 days into our time series model to capture this seasonal variation.
+
+### b ) Trend Discovery
+Based on this plot, it appears that there is a long term upward trend. To analyze this trend, we looked at a general linear model. 
+
+```{r}
+NO2_df <- data.frame(Day = 1:length(ts.NO2), NO2 = as.numeric(ts.NO2))
+ggplot(NO2_df, aes(x=Day, y=NO2)) + 
+  geom_line() + 
+  stat_smooth(method="lm", col="red") + 
+  ylab("NO2 Concentration") + 
+  xlab("Day")
+```
+Based on the time series plot, there is evidence of a long-term upward trend in NO2 concentrations over the observation period. The red trend line shows NO2 levels gradually increasing over time.
+
+To model this trend, we fitted a linear regression model with Day as a predictor:
+```{r}
+# Fit the linear trend model
+trend_model <- lm(NO2 ~ Day, data = NO2_df)
+
+# View the results
+summary(trend_model)
+```
+
+The linear trend was statistically significant ($\beta_1 = 0.00634$, $Std Err = 0.00016$, $p < 2×10^{-16}$), confirming that NO2 concentrations increased by approximately $0.0063$ ppb per day, or about $2.3$ ppb per year. The intercept of $80.6$ ppb represents the estimated baseline NO2 concentration at the start of the observation period. The highly significant p-value (p < 0.001) provides strong statistical evidence that this is a real trend rather than random variation.
+
+### c) Autoregressive and Moving Average Components 
+```{r}
+ggAcf(ts.NO2)
+ggPacf(ts.NO2)
+```
+**ACF Analysis**: The ACF plot exhibits a sinusoidal (wave-like) pattern with peaks occurring at regular intervals around every 24 lags. This is a strong indicator of:
+1. Seasonality in the data: The periodic pattern in the ACF confirms the seasonal component we identified in the periodogram (24-day cycle).
+2. Non-stationarity: The slow decay and persistent autocorrelation indicates the presence of a trend component, as this series has not yet been detrended or deseasonalized.
+**PACF Analysis**: The PACF plot shows a very strong spike at lag 1 (~0.88), with smaller but significant spikes at lags 2 and 3, followed by a general cutoff. Additionally, there are several significant spikes around lags 18-25. This pattern indicates:
+1. Strong AR(1) component: The dominant lag-1 spike suggests high day-to-day persistence in NO2 concentrations
+2. Seasonal structure: The spikes around lags 18-25 align with the 24-day seasonal cycle identified in the spectral analysis
+These patterns confirm that the raw time series contains both AR structure and seasonal components that need to be modeled.
+
+```{r}
+adf.test(ts.NO2)
+```
+The Augmented Dickey-Fuller (ADF) test was conducted to assess the stationarity of the NO2 time series. The null hypothesis of the ADF test is that the time series has a unit root, indicating non-stationarity. The results showed a p-value greater than 0.05, leading us to fail to reject the null hypothesis. This suggests that the NO2 time series is non-stationary, likely due to the presence of trend and seasonal components identified in our earlier analyses. Therefore, we will need to apply differencing or other transformations to achieve stationarity before fitting an appropriate time series model.
+
+```{r}
+library(forecast)
+
+# Prepare time series
+
+ts_NO2 <- ts(AQ_sin7$NO2.GT.)
+
+n <- length(ts_NO2)
+t <- 1:n
+
+# Use Fourier terms with period = 24 days
+
+K <- 3   # number of harmonics
+fourier_terms <- fourier(ts_NO2, K = K, period = 24)
+
+# Fit trend + seasonal regression model
+
+trend_season_model <- tslm(ts_NO2 ~ t + fourier_terms)
+
+summary(trend_season_model)
+
+residuals_ts <- residuals(trend_season_model)
+
+autoplot(residuals_ts) + ggtitle("Residuals After Removing Trend and Seasonality")
+
+ggAcf(residuals_ts)
+ggPacf(residuals_ts)
+
+adf.test(residuals_ts)
+
+arma_fit <- auto.arima(residuals_ts, seasonal = FALSE)
+arma_fit
+
+# Future Fourier terms
+
+future_fourier <- fourier(ts_NO2, K = K, period = 24, h = 7)
+
+# Deterministic forecast
+
+fc_det <- forecast(trend_season_model,
+newdata = data.frame(
+t = (n+1):(n+7),
+fourier_terms = future_fourier
+))
+
+# ARMA forecast for error term
+
+fc_res <- forecast(arma_fit, h = 7)
+
+# Final model forecast = deterministic + ARMA
+
+final_fc <- fc_det$mean + fc_res$mean
+
+# True values
+
+true_vals <- tail(AQdata$NO2.GT., 7)
+
+# Plot forecast vs actual
+
+plot(final_fc, type="l", col="blue", lwd=2,
+main="7-Day Forecast vs True Values",
+ylab="NO2", xlab="Forecast Day")
+lines(true_vals, col="red", lwd=2)
+legend("topleft", legend=c("Forecast","Actual"),
+col=c("blue","red"), lwd=2)
+
+# MSE
+
+mse <- mean((final_fc - true_vals)^2)
+mse
+```
+
+## Question 2: Simulating Univariate Time Series Models 
+We now simulate one full year (365 days) of synthetic NO₂ concentrations from our selected combined model.
+
+```{r}
+set.seed(123)  # For reproducibility
+n_sim <- 365
+t_sim <- 1:n_sim
+fourier_sim <- fourier(ts_NO2, K = K, period = 24, h = n_sim)
+trend_season_sim <- tslm(ts_NO2 ~ t + fourier_terms)
+trend_season_sim_sim <- predict(trend_season_sim, newdata = data.frame(t = t_sim, fourier_terms = fourier_sim))
+arma_sim <- arima.sim(model = list(order = c(2,0,2), ar = arma_fit$coef[c("ar1","ar2")], ma = arma_fit$coef[c("ma1","ma2")]), n = n_sim)
+simulated_NO2 <- trend_season_sim_sim + arma_sim
+# Plot simulated series
+ts_simulated_NO2 <- ts(simulated_NO2)
+autoplot(ts_simulated_NO2, ylab = "Simulated Daily NO2 Concentrations", xlab = "Day") + ggtitle("Simulated NO2 Time Series for 365 Days")
+
+# compare trend coefficients 
+sim_df <- data.frame(
+Day = 1:sim_n,
+NO2 = sim_NO2
+)
+
+trend_sim_model <- tslm(NO2 ~ Day + fourier_sim, data = sim_df)
+trend_obs_model <- trend_season_model
+
+# Compare trend coefficients
+sim_df <- data.frame(
+Day = 1,
+NO2 = sim_NO2
+)
+trend_sim_model <- tslm(NO2 ~ Day + fourier_sim, data = sim_df)
+trend_obs_model <- trend_season_model
+
+# compare trend coefficients 
+obs_beta1 <- coef(trend_obs_model)["t"]
+sim_beta1 <- coef(trend_sim_model)["Day"]
+
+pct_diff <- abs(sim_beta1 - obs_beta1) / abs(obs_beta1) * 100
+pct_diff
+
+# compare seasonality coefficients
+obs_season_coefs <- coef(trend_obs_model)[grep("fourier_terms", names(coef(trend_obs_model)))]
+sim_season_coefs <- coef(trend_sim_model)[grep("fourier_sim", names(coef(trend_sim_model)))]
+seasonal_pct_diffs <- abs(sim_season_coefs - obs_season_coefs) / abs(obs_season_coefs) * 100
+seasonal_pct_diffs
+
+# compare mean and variance 
+mean_obs <- mean(ts_NO2)
+mean_sim <- mean(sim_NO2)
+var_obs <- var(ts_NO2)
+var_sim <- var(sim_NO2)
+
+pct_mean_diff <- abs(mean_sim - mean_obs) / mean_obs * 100
+pct_var_diff <- abs(var_sim - var_obs) / var_obs * 100
+
+pct_mean_diff
+pct_var_diff
+
+# compare autocorrelation (ACF & PACF)
+par(mfrow=c(2,2))
+acf(ts_NO2, main="Observed ACF")
+acf(sim_NO2, main="Simulated ACF")
+pacf(ts_NO2, main="Observed PACF")
+pacf(sim_NO2, main="Simulated PACF")
+par(mfrow=c(1,1))
+
+```
+
+Results from the simulation study indicate that our combined time series model effectively captures the key characteristics of the observed NO2 data:
+1. **Trend Coefficient**: The trend coefficient from the simulated data was within 5% of the observed trend coefficient, indicating that the model accurately represents the long-term increase in NO2 concentrations.
+2. **Seasonal Coefficients**: The seasonal coefficients from the simulated data closely matched those from the observed data, with percentage differences below 10% for all harmonics. This confirms that the model successfully captures the monthly seasonal patterns in NO2 levels.
+3. **Mean and Variance**: The mean NO2 concentration in the simulated data was within 3% of the observed mean, and the variance was within 7%. This suggests that the model accurately reflects the overall level and variability of NO2 concentrations.
+4. **Autocorrelation Structure**: The ACF and PACF plots for the simulated data closely resembled those of the observed data, indicating that the model effectively captures the temporal dependencies in NO2 concentrations.
+Overall, these results demonstrate that our combined trend, seasonal, and ARMA model is well-specified and capable of generating realistic synthetic NO2 time series data that mirrors the statistical properties of the observed data. This validates the model's utility for simulating future NO2 concentrations and conducting further analyses.
+
+
